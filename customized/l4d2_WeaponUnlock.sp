@@ -1,9 +1,10 @@
 #include <sourcemod>
 #include <sdktools>
+#include <sdkhooks>
 #pragma semicolon				1
+#pragma newdecls required
 
-
-#define PLUGIN_VERSION 			"0.8.9"
+#define PLUGIN_VERSION 			"0.9.0"
 #define TEST_DEBUG				0
 #define TEST_DEBUG_LOG			1
 
@@ -28,62 +29,64 @@
 #define RIFLE_SG552 			34
 #define SNIPER_AWP 				35
 #define SNIPER_SCOUT 			36
+//credits to Rectus https://steamcommunity.com/sharedfiles/filedetails/?id=924194917
+#define VS_PRECACHEWEAPONS "local weapons = [\"weapon_rifle_sg552\", \"weapon_smg_mp5\", \"weapon_sniper_awp\", \"weapon_sniper_scout\"];foreach(weapon in weapons){PrecacheEntityFromTable({classname = weapon});};"
 
-
-static const Float:PLUGINSTART_DELAY		= 1.0;
-static const Float:ROUNDSTART_DELAY			= 6.0;
-static const Float:LOCATION_ERROR_MARGIN	= 4.0;
+const float PLUGINSTART_DELAY		= 1.0;
+const float ROUNDSTART_DELAY			= 6.0;
+const float LOCATION_ERROR_MARGIN	= 4.0;
 
 // chances weapons getting transformed into CSS brethren are 1:X - X being the value set here. 1:1 is 100%, 1:2 is 50%, 1:3 is 33%, 1:4 is 25%, 1:5 is 20%...
-static const SG552_LOTTERY_CHANCE			= 4;
-static const MP5_LOTTERY_CHANCE				= 3;
-static const AWP_LOTTERY_CHANCE				= 2;
-static const SCOUT_LOTTERY_CHANCE			= 2;
+const SG552_LOTTERY_CHANCE			= 4;
+const MP5_LOTTERY_CHANCE				= 3;
+const AWP_LOTTERY_CHANCE				= 2;
+const SCOUT_LOTTERY_CHANCE			= 2;
 
 // other chances, again in 1:X format
-static const PISTOL_IS_MAGNUM_CHANCE		= 3;
-static const RIFLE_IS_DESERT_ED_CHANCE		= 3;
-static const GRENADE_KEEPS_CLASS_CHANCE 	= 3;
-static const SPAS_IS_AUTOSHOTGUN_CHANCE 	= 2;
-static const PUMPSHOT_IS_CHROME_CHANCE		= 2;
-static const SMG_IS_SILENCED_CHANCE			= 2;
+const PISTOL_IS_MAGNUM_CHANCE		= 3;
+const RIFLE_IS_DESERT_ED_CHANCE		= 3;
+//const GRENADE_KEEPS_CLASS_CHANCE 	= 3;//default
+const GRENADE_KEEPS_CLASS_CHANCE 	= 100;
+const SPAS_IS_AUTOSHOTGUN_CHANCE 	= 2;
+const PUMPSHOT_IS_CHROME_CHANCE		= 2;
+const SMG_IS_SILENCED_CHANCE			= 2;
 
 
-static const String:VEC_ORIGIN_ENTPROP[]	= "m_vecOrigin";
-static const String:ANG_ROTATION_ENTPROP[]	= "m_angRotation";
-static const String:WEAPON_ID_ENTPROP[]		= "m_weaponID";
+char VEC_ORIGIN_ENTPROP[] = "m_vecOrigin";
+char ANG_ROTATION_ENTPROP[]	= "m_angRotation";
+char WEAPON_ID_ENTPROP[]	= "m_weaponID";
 
 
-static Handle:cvarEnabled					= INVALID_HANDLE;
-static Handle:cvarAWPEnabled				= INVALID_HANDLE;
-static Handle:cvarMP5Enabled				= INVALID_HANDLE;
-static Handle:cvarScoutEnabled				= INVALID_HANDLE;
-static Handle:cvarSG552Enabled				= INVALID_HANDLE;
+static Handle cvarEnabled					= INVALID_HANDLE;
+static Handle cvarAWPEnabled				= INVALID_HANDLE;
+static Handle cvarMP5Enabled				= INVALID_HANDLE;
+static Handle cvarScoutEnabled				= INVALID_HANDLE;
+static Handle cvarSG552Enabled				= INVALID_HANDLE;
 
 static WeaponSpawn_ID[64]					= 0;
 static WeaponSpawn_IDMod[64]				= 0;
-static Float:WeaponOrigin[64][3];
-static Float:WeaponAngles[64][3];
+static float WeaponOrigin[64][3];
+static float WeaponAngles[64][3];
 
-static bool:InitFinished					= false;
+static bool InitFinished					= false;
 //Used to keep spawns the same for both teams on competitive modes.
-static bool:g_bNewMap						= false;
-static bool:g_bScavengeHalftime				= false;
+static bool g_bNewMap						= false;
+static bool g_bScavengeHalftime				= false;
 
-forward SRS_OnItemsHandled(bool:justIndexed);
+forward void SRS_OnItemsHandled(bool justIndexed);
 
-public Plugin:myinfo =
+public Plugin myinfo =
 {
 	name = "[L4D2] Weapon Unlock",
-	author = "Crimson_Fox & AtomicStryker",
+	author = "Crimson_Fox & AtomicStryker & z",
 	description = "Unlocks the hidden CSS weapons.",
 	version = PLUGIN_VERSION,
 	url = "http://forums.alliedmods.net/showthread.php?p=1041458"
 }
 
-public OnPluginStart()
+public void OnPluginStart()
 {
-	decl String:game[16];
+	char game[16];
 	GetGameFolderName(game, sizeof(game)); 	//Look up what game we're running, and don't load if it's not L4D2.
 	if (!StrEqual(game, "left4dead2", false))
 	{
@@ -91,14 +94,14 @@ public OnPluginStart()
 	}
 	
 	//Set up cvars and event hooks.
-	CreateConVar(					 "l4d2_WeaponUnlock", 	PLUGIN_VERSION, "Weapon Unlock version.", 				FCVAR_PLUGIN|FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
-	cvarEnabled = 		CreateConVar("l4d2_wu_enable", 		"1", 			"Is Weapon Unlock plug-in enabled?", 	FCVAR_PLUGIN|FCVAR_DONTRECORD);
-	cvarAWPEnabled = 	CreateConVar("l4d2_wu_awp", 		"1", 			"Enable AWP sniper rifle?", 			FCVAR_PLUGIN);
-	cvarMP5Enabled = 	CreateConVar("l4d2_wu_mp5", 		"1", 			"Enable MP5 submachine gun?", 			FCVAR_PLUGIN);
-	cvarScoutEnabled = 	CreateConVar("l4d2_wu_scout", 		"1", 			"Enable Scout sniper rifle?", 			FCVAR_PLUGIN);
-	cvarSG552Enabled = 	CreateConVar("l4d2_wu_sg552", 		"1", 			"Enable SG552 assault rifle?", 			FCVAR_PLUGIN);
+	CreateConVar(					 "l4d2_weaponunlock", 	PLUGIN_VERSION, "Weapon Unlock version.", 				FCVAR_NONE|FCVAR_SPONLY|FCVAR_REPLICATED|FCVAR_NOTIFY|FCVAR_DONTRECORD);
+	cvarEnabled = 		CreateConVar("l4d2_wu_enable", 		"1", 			"Is Weapon Unlock plug-in enabled?", 	FCVAR_NONE|FCVAR_DONTRECORD);
+	cvarAWPEnabled = 	CreateConVar("l4d2_wu_awp", 		"1", 			"Enable AWP sniper rifle?", 			FCVAR_NONE);
+	cvarMP5Enabled = 	CreateConVar("l4d2_wu_mp5", 		"1", 			"Enable MP5 submachine gun?", 			FCVAR_NONE);
+	cvarScoutEnabled = 	CreateConVar("l4d2_wu_scout", 		"1", 			"Enable Scout sniper rifle?", 			FCVAR_NONE);
+	cvarSG552Enabled = 	CreateConVar("l4d2_wu_sg552", 		"1", 			"Enable SG552 assault rifle?", 			FCVAR_NONE);
 	
-	AutoExecConfig(true, "l4d2_WeaponUnlock");
+	AutoExecConfig(true, "l4d2_weaponunlock");
 	
 	HookEvent("round_start", Event_RoundStart);
 	HookEvent("scavenge_round_halftime", Event_ScavengeRoundHalftime);
@@ -110,7 +113,7 @@ public OnPluginStart()
 	CreateTimer(PLUGINSTART_DELAY, InitHiddenWeaponsDelayed);
 }
 
-public ConVarChange_Enabled(Handle:convar, const String:oldValue[], const String:newValue[])
+public void ConVarChange_Enabled(Handle convar, const char[] oldValue, const char[] newValue)
 {
 	if ((StringToInt(oldValue) == 1) && (StringToInt(newValue) == 0))
 	{
@@ -122,23 +125,37 @@ public ConVarChange_Enabled(Handle:convar, const String:oldValue[], const String
 	}
 }
 
-public OnMapStart()
+public void OnMapStart()
 {
 	g_bNewMap = true;
 	g_bScavengeHalftime = false;
-	for (new i = 0; i < sizeof(WeaponSpawn_ID); i++)
+	for (int i = 0; i < sizeof(WeaponSpawn_ID); i++)
 	{
 		WeaponSpawn_ID[i] = -1;
 	}
+
+}
+public void OnEntityCreated(int entity, const char[] classname){
+
+	if(g_bNewMap && strcmp(classname, "info_director") == 0)
+		SDKHook(entity, SDKHook_SpawnPost, OnSpawnedDirector);
 }
 
-public Action:Event_RoundStart(Handle:event, const String:name[], bool:dontBroadcast)
+public void OnSpawnedDirector(int entity){
+	if (entity > 0 && entity > MaxClients && IsValidEntity(entity)){
+		//precache css weapons with VScript
+		SetVariantString(VS_PRECACHEWEAPONS);
+		AcceptEntityInput(entity, "RunScriptCode");
+	}
+}
+
+public void Event_RoundStart(Event event, const char[] name, bool dontBroadcast)
 {
 	if (!GetConVarBool(cvarEnabled)) return;
 	CreateTimer(ROUNDSTART_DELAY, RoundStartDelayed);
 }
 
-public SRS_OnItemsHandled(bool:justIndexed)
+public void SRS_OnItemsHandled(bool justIndexed)
 {
 	DebugPrintToAll("SRS_OnItemsHandled fired, justIndexed: %b", justIndexed);
 	
@@ -156,9 +173,9 @@ public SRS_OnItemsHandled(bool:justIndexed)
 	SpawnIndexedWeapons();
 }
 
-static bool:IsSRSMODactive()
+static bool IsSRSMODactive()
 {
-	new Handle:cvar = FindConVar("srs_remove_enabled");
+	Handle cvar = FindConVar("srs_remove_enabled");
 	if (cvar != INVALID_HANDLE)
 	{
 		if (GetConVarBool(cvar))
@@ -169,12 +186,12 @@ static bool:IsSRSMODactive()
 	return false;
 }
 
-static bool:IsAllowedMap()
+static bool IsAllowedMap()
 {
-	decl String:GameMode[16];
+	char GameMode[16];
 	GetConVarString(FindConVar("mp_gamemode"), GameMode, sizeof(GameMode));
 	
-	decl String:Map[56];
+	char Map[56];
 	GetCurrentMap(Map, sizeof(Map));
 	//If we're in a coop mode and running c4m1-4, don't modify spawns as it causes crashes on transitions.
 	if (
@@ -192,7 +209,7 @@ static bool:IsAllowedMap()
 	return true;
 }
 
-public Action:RoundStartDelayed(Handle:timer)
+public Action RoundStartDelayed(Handle timer)
 {
 	if (!InitFinished || !IsAllowedMap()) return;
 	
@@ -203,7 +220,7 @@ public Action:RoundStartDelayed(Handle:timer)
 	}
 	
 	//Look up the map and type of game we're running.
-	decl String:GameMode[16];
+	char GameMode[16];
 	GetConVarString(FindConVar("mp_gamemode"), GameMode, sizeof(GameMode));
 	
 	if (StrEqual(GameMode, "survival"))
@@ -233,18 +250,18 @@ public Action:RoundStartDelayed(Handle:timer)
 	SpawnIndexedWeapons();
 }
 
-public Action:Event_ScavengeRoundHalftime(Handle:event, const String:name[], bool:dontBroadcast)
+public void Event_ScavengeRoundHalftime(Event event, const char[] name, bool dontBroadcast)
 {
 	g_bScavengeHalftime = true;
 }
 
-static IndexWeaponSpawns()
+void IndexWeaponSpawns()
 {
 	//Search for dynamic weapon spawns,
-	decl String:EdictClassName[32];
-	new count = 0;
-	new entcount = GetEntityCount();
-	for (new i = 32; i <= entcount; i++)
+	char EdictClassName[32];
+	int count = 0;
+	int entcount = GetEntityCount();
+	for (int i = 32; i <= entcount; i++)
 	{
 		if (IsValidEdict(i))
 		{
@@ -265,11 +282,11 @@ static IndexWeaponSpawns()
 	}
 	
 	//If dynamic spawns were found, and we're not running scavenge, modify the stored spawns like this:
-	decl String:GameMode[16];
+	char GameMode[16];
 	GetConVarString(FindConVar("mp_gamemode"), GameMode, sizeof(GameMode));
 	if (!StrEqual(GameMode, "scavenge"))
 	{
-		for (new i = 0; i <= count; i++)
+		for (int i = 0; i <= count; i++)
 		{
 			WeaponSpawn_IDMod[i] = WeaponSpawn_ID[i];
 			switch(WeaponSpawn_ID[i])
@@ -287,9 +304,9 @@ static IndexWeaponSpawns()
 	//Otherwise, search for static spawns,
 	else
 	{
-		new dynamiccount = count;
+		int dynamiccount = count;
 		
-		for (new i = 32; i <= entcount; i++)
+		for (int i = 32; i <= entcount; i++)
 		{
 			if (IsValidEdict(i))
 			{
@@ -309,7 +326,7 @@ static IndexWeaponSpawns()
 			}
 		}
 		//and modify them like this:
-		for (new i = dynamiccount; i <= count; i++)
+		for (int i = dynamiccount; i <= count; i++)
 		{
 			WeaponSpawn_IDMod[i] = WeaponSpawn_ID[i];
 			switch(WeaponSpawn_ID[i])
@@ -463,7 +480,7 @@ static IndexWeaponSpawns()
 	}
 }
 
-static SetModelForWeaponId(weaponent, id)
+void SetModelForWeaponId(int weaponent, int id)
 {
 	switch(id)
 	{
@@ -490,16 +507,16 @@ static SetModelForWeaponId(weaponent, id)
 	}
 }
 
-static SpawnIndexedWeapons()
+void SpawnIndexedWeapons()
 {
 	PrecacheWeaponModels();
 	WipeStoredWeapons();
 	
 	DebugPrintToAll("Commencing to spawn indexed weapons now");
 	
-	new spawnedent;
+	int spawnedent;
 	
-	for (new i = 0; i < sizeof(WeaponSpawn_ID); i++)
+	for (int i = 0; i < sizeof(WeaponSpawn_ID); i++)
 	{
 		if (WeaponSpawn_ID[i] == -1) break;
 		
@@ -520,27 +537,27 @@ static SpawnIndexedWeapons()
 			DispatchKeyValue(spawnedent, "count", "4");
 		}
 		
-		DebugPrintToAll("Spawning indexed gun %i, new ent %i, original id %i, modid %i", i, spawnedent, WeaponSpawn_ID[i], WeaponSpawn_IDMod[i]);
+		DebugPrintToAll("Spawning indexed gun %i, int ent %i, original id %i, modid %i", i, spawnedent, WeaponSpawn_ID[i], WeaponSpawn_IDMod[i]);
 		DispatchSpawn(spawnedent);
 	}
 	
 	DebugPrintToAll("Finished Spawning indexed weapons");
 }
 
-static WipeStoredWeapons()
+void WipeStoredWeapons()
 {
 	DebugPrintToAll("WipeStoredWeapons() was called. Removing stored Weapon Spawns on map");
 	
-	decl String:GameMode[16];
+	char GameMode[16];
 	GetConVarString(FindConVar("mp_gamemode"), GameMode, sizeof(GameMode));
-	new bool:wipestaticspawns = (StrEqual(GameMode, "scavenge"));
+	bool wipestaticspawns = (StrEqual(GameMode, "scavenge"));
 	if (wipestaticspawns) DebugPrintToAll("Gamemode is Scavenge, also wiping static Spawns");
 	
-	new entcount = GetEntityCount();
-	decl String:EdictClassName[64];
-	decl Float:origin[3];
+	int entcount = GetEntityCount();
+	char EdictClassName[64];
+	float origin[3];
 	
-	for (new i = 32; i <= entcount; i++)
+	for (int i = 32; i <= entcount; i++)
 	{
 		if (IsValidEdict(i) && IsValidEntity(i)) // because people still got me logs of "Is invalid edict" after IsValidEdict ... WTFFFF
 		{
@@ -558,9 +575,9 @@ static WipeStoredWeapons()
 	}
 }
 
-static bool:IsIndexedOrigin(Float:origin[3])
+static bool IsIndexedOrigin(float origin[3])
 {
-	for (new i = 0; i < sizeof(WeaponSpawn_ID); i++)
+	for (int i = 0; i < sizeof(WeaponSpawn_ID); i++)
 	{
 		if (WeaponSpawn_ID[i] == -1) break;
 		
@@ -574,7 +591,7 @@ static bool:IsIndexedOrigin(Float:origin[3])
 	return false;
 }
 
-static bool:IsWantedGunEntity(const String:EdictClassName[])
+bool IsWantedGunEntity(const char[] EdictClassName)
 {
 	return (
 	StrEqual(EdictClassName, "weapon_spawn") ||
@@ -596,15 +613,15 @@ static bool:IsWantedGunEntity(const String:EdictClassName[])
 	StrEqual(EdictClassName, "weapon_vomitjar_spawn"));
 }
 
-static RestoreWeaponSpawns()
+void RestoreWeaponSpawns()
 {
 	WipeStoredWeapons();
 	
 	DebugPrintToAll("Commencing to restore default indexed weapons now");
 	
-	new spawnedent;
+	int spawnedent;
 	
-	for (new i = 0; i < sizeof(WeaponSpawn_ID); i++)
+	for (int i = 0; i < sizeof(WeaponSpawn_ID); i++)
 	{
 		if (WeaponSpawn_ID[i] == -1) break;
 		
@@ -625,14 +642,14 @@ static RestoreWeaponSpawns()
 			DispatchKeyValue(spawnedent, "count", "4");
 		}
 		
-		DebugPrintToAll("Spawning default indexed gun %i, new ent %i, original id %i, unused modid %i", i, spawnedent, WeaponSpawn_ID[i], WeaponSpawn_IDMod[i]);
+		DebugPrintToAll("Spawning default indexed gun %i, int ent %i, original id %i, unused modid %i", i, spawnedent, WeaponSpawn_ID[i], WeaponSpawn_IDMod[i]);
 		DispatchSpawn(spawnedent);
 	}
 	
 	DebugPrintToAll("Finished Spawning default indexed weapons");
 }
 
-static PrecacheWeaponModels()
+void PrecacheWeaponModels()
 {
 	//Precache weapon models if they're not loaded.
 	CheckModelPreCache("models/w_models/weapons/w_rifle_sg552.mdl");
@@ -649,7 +666,7 @@ static PrecacheWeaponModels()
 	CheckModelPreCache("models/v_models/v_m60.mdl");
 }
 
-stock CheckModelPreCache(const String:Modelfile[])
+stock void CheckModelPreCache(const char[] Modelfile)
 {
 	if (!IsModelPrecached(Modelfile))
 	{
@@ -657,32 +674,20 @@ stock CheckModelPreCache(const String:Modelfile[])
 	}
 }
 
-public Action:InitHiddenWeaponsDelayed(Handle:timer, any:client)
+public Action InitHiddenWeaponsDelayed(Handle timer)
 {
 	//Spawn and delete the hidden weapons,
-	PreCacheGun("weapon_rifle_sg552");
-	PreCacheGun("weapon_smg_mp5");
-	PreCacheGun("weapon_sniper_awp");
-	PreCacheGun("weapon_sniper_scout");
-	PreCacheGun("weapon_rifle_m60");
-	
+	L4D2_RunScript(VS_PRECACHEWEAPONS);
 	InitFinished = true;
-	decl String:Map[56];
+	char Map[56];
 	GetCurrentMap(Map, sizeof(Map));
 	ForceChangeLevel(Map, "Hidden weapon initialization.");
 }
 
-static PreCacheGun(const String:GunEntity[])
-{
-	new index = CreateEntityByName(GunEntity);
-	DispatchSpawn(index);
-	RemoveEdict(index);
-}
-
-stock DebugPrintToAll(const String:format[], any:...)
+stock void DebugPrintToAll(const char[] format, any ...)
 {
 	#if (TEST_DEBUG || TEST_DEBUG_LOG)
-	decl String:buffer[256];
+	char buffer[256];
 	
 	VFormat(buffer, sizeof(buffer), format, 2);
 	
@@ -699,4 +704,29 @@ stock DebugPrintToAll(const String:format[], any:...)
 	else
 	return;
 	#endif
+}
+
+stock void L4D2_RunScript(const char[] sCode, any ...) {
+
+	/**
+	* Run a VScript (Credit to Timocop)
+	*
+	* @param sCode		Magic
+	* @return void
+	*/
+
+	static int iScriptLogic = INVALID_ENT_REFERENCE;
+	if(iScriptLogic == INVALID_ENT_REFERENCE || !IsValidEntity(iScriptLogic)) {
+		iScriptLogic = EntIndexToEntRef(CreateEntityByName("logic_script"));
+
+		if(iScriptLogic == INVALID_ENT_REFERENCE || !IsValidEntity(iScriptLogic)) {
+			SetFailState("Could not create 'logic_script'");
+		}
+		DispatchSpawn(iScriptLogic);
+	}
+
+	char sBuffer[512];
+	VFormat(sBuffer, sizeof(sBuffer), sCode, 2);
+	SetVariantString(sBuffer);
+	AcceptEntityInput(iScriptLogic, "RunScriptCode");
 }
